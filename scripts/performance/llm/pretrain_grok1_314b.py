@@ -54,6 +54,7 @@ from nemo.collections.llm.recipes.optim.adam import distributed_fused_adam_with_
 from nemo.collections.llm.recipes.precision.mixed_precision import bf16_with_fp8_mixed
 from nemo.collections.llm.recipes.tp_overlap_configs.userbuffers import (
     userbuffers_fp8_b200_h16384_tp4_cp2_mbs1_seqlen8192,
+    userbuffers_fp8_h100_h16384_tp8_cp2_mbs1_seqlen8192,
 )
 from nemo.lightning.pytorch.callbacks.garbage_collection import GarbageCollectionCallback
 from nemo.lightning.pytorch.callbacks.megatron_comm_overlap import MegatronCommOverlapCallback
@@ -331,10 +332,17 @@ def override_recipe_configs(
         args.wandb_prj_name,
         args.wandb_job_name,
     )
+    gpu_type = args.gpu.lower()
 
     # data module configs
     recipe.data.num_train_samples = max_steps * gbs * mbs  # ensure only 1 epoch for whole run
     recipe.data.tokenizer = hf_tokenizer("meta-llama/Meta-Llama-3-70B")
+
+    ub_cfg = {
+        "h100": userbuffers_fp8_h100_h16384_tp8_cp2_mbs1_seqlen8192,
+        "b200": userbuffers_fp8_b200_h16384_tp4_cp2_mbs1_seqlen8192,
+        "gb200": userbuffers_fp8_b200_h16384_tp4_cp2_mbs1_seqlen8192,
+    }
 
     # compute dtype configs
     if args.compute_dtype.lower() == "fp8":
@@ -344,7 +352,7 @@ def override_recipe_configs(
     comm_overlap_callback_idx = get_comm_overlap_callback_idx(recipe.trainer.callbacks)
     assert comm_overlap_callback_idx is not None, "MegatronCommOverlapCallback missing. Required for performance."
 
-    tp_comm_overlap_cfg = userbuffers_fp8_b200_h16384_tp4_cp2_mbs1_seqlen8192
+    tp_comm_overlap_cfg = ub_cfg[gpu_type]
     # needed as tp_overlap_configs.userbuffers are dataclass objects which are unserializable
     tp_comm_overlap_cfg = fdl.cast(run.Config, fdl_dc.convert_dataclasses_to_configs(tp_comm_overlap_cfg))
     recipe.trainer.callbacks[comm_overlap_callback_idx].tp_comm_overlap_cfg = tp_comm_overlap_cfg
