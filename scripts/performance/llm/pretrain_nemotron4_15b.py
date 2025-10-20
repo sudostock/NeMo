@@ -15,6 +15,9 @@
 import argparse
 from os.path import basename, splitext
 
+# TEMPORARY WORKAROUND - Remove in next release when upstream srun issue is fixed
+from ..slurm_exit_code_override import *  # Monkey-patch for false-positive job failures
+
 import fiddle as fdl
 import fiddle._src.experimental.dataclasses as fdl_dc
 import nemo_run as run
