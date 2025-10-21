@@ -34,8 +34,9 @@ Usage:
 """
 
 import os
-from nemo_run.core.execution.slurm import SlurmBatchRequest
+
 import nemo_run.core.execution.slurm as slurm_module
+from nemo_run.core.execution.slurm import SlurmBatchRequest
 
 # Store original implementations for restoration
 _ORIGINAL_MATERIALIZE = SlurmBatchRequest.materialize
@@ -45,26 +46,26 @@ _ORIGINAL_FILL_TEMPLATE = slurm_module.fill_template
 def _custom_materialize(self) -> str:
     """
     Patched materialize that injects log validation variables and custom template.
-    
+
     Returns:
         str: Generated sbatch script content with log validation logic
     """
-    
+
     def _custom_fill_template(template_name, variables, template_dir=None):
         """Intercept slurm.sh.j2 template requests and redirect to our custom template."""
         if template_name == "slurm.sh.j2":
             # Inject variables needed for log validation
             variables["log_dir"] = self.executor.job_details.folder or self.executor.job_dir
             variables["job_name"] = self.executor.job_details.job_name or self.executor.job_name
-            
+
             # Use custom template from this script's directory
             script_dir = os.path.dirname(os.path.abspath(__file__))
             custom_template_dir = os.path.join(script_dir, "templates")
             return _ORIGINAL_FILL_TEMPLATE("slurm_log_success_check.sh.j2", variables, custom_template_dir)
-        
+
         # Pass through all other template requests unchanged
         return _ORIGINAL_FILL_TEMPLATE(template_name, variables, template_dir)
-    
+
     # Temporarily replace fill_template during materialize
     slurm_module.fill_template = _custom_fill_template
     try:
@@ -72,7 +73,7 @@ def _custom_materialize(self) -> str:
     finally:
         # Always restore original, even if materialize fails
         slurm_module.fill_template = _ORIGINAL_FILL_TEMPLATE
-    
+
     return result
 
 
@@ -80,4 +81,3 @@ def _custom_materialize(self) -> str:
 SlurmBatchRequest.materialize = _custom_materialize
 
 print("[SLURM PATCH] Exit code override enabled - will validate logs for false-positive failures")
-
