@@ -25,6 +25,11 @@ from nemo.utils import logging
 
 DEFAULT_NEMO_HOME = os.getenv('NEMO_HOME', DEFAULT_NEMO_CACHE_HOME)
 
+# WORKAROUND: Buffer time for srun timeout to ensure jobs exit before sbatch timeout.
+# This allows proper exit code validation. Set to 5 minutes (300 seconds).
+# TODO: Remove this workaround once the underlying job exit issue is resolved.
+SRUN_TIMEOUT_BUFFER_SECONDS = 300  # 5 minutes
+
 # NOTE: If you update this template,
 # PLEASE test it by submitting a job to GPU/node/cluster and verifying the sbatch and bash scripts.
 INLINE_TEMPLATE = r"""
@@ -34,6 +39,117 @@ set -euo pipefail
 # NOTE: DO NOT change the single quotes to double quotes.
 bash -c '{{ pre_cmds }} {{ command }}'
 """
+
+
+def parse_slurm_time_to_seconds(time_str: str) -> int:
+    """
+    Parse Slurm time format string to total seconds.
+    
+    Supports common Slurm time formats:
+    - DD-HH:MM:SS (e.g., "2-04:30:00" = 2 days, 4 hours, 30 minutes)
+    - HH:MM:SS (e.g., "04:30:00" = 4 hours, 30 minutes)
+    - HH:MM (e.g., "04:30" = 4 hours, 30 minutes)
+    - MM (e.g., "30" = 30 minutes)
+    
+    Args:
+        time_str: Slurm time format string
+        
+    Returns:
+        Total time in seconds
+        
+    Raises:
+        ValueError: If time_str is not a valid Slurm time format
+    """
+    time_str = time_str.strip()
+    
+    # Try to match DD-HH:MM:SS format
+    if '-' in time_str:
+        parts = time_str.split('-')
+        if len(parts) != 2:
+            raise ValueError(f"Invalid Slurm time format: {time_str}")
+        days = int(parts[0])
+        time_part = parts[1]
+    else:
+        days = 0
+        time_part = time_str
+    
+    # Parse the time part (HH:MM:SS, HH:MM, or MM)
+    time_components = time_part.split(':')
+    
+    if len(time_components) == 3:
+        # HH:MM:SS
+        hours, minutes, seconds = int(time_components[0]), int(time_components[1]), int(time_components[2])
+    elif len(time_components) == 2:
+        # HH:MM
+        hours, minutes, seconds = int(time_components[0]), int(time_components[1]), 0
+    elif len(time_components) == 1:
+        # MM (just minutes)
+        hours, minutes, seconds = 0, int(time_components[0]), 0
+    else:
+        raise ValueError(f"Invalid Slurm time format: {time_str}")
+    
+    total_seconds = days * 86400 + hours * 3600 + minutes * 60 + seconds
+    return total_seconds
+
+
+def format_seconds_to_slurm_time(total_seconds: int) -> str:
+    """
+    Convert seconds to Slurm time format string.
+    
+    Returns the most appropriate format based on the duration:
+    - If >= 1 day: DD-HH:MM:SS format
+    - Otherwise: HH:MM:SS format
+    
+    Args:
+        total_seconds: Total time in seconds
+        
+    Returns:
+        Slurm-formatted time string
+    """
+    days = total_seconds // 86400
+    remaining = total_seconds % 86400
+    hours = remaining // 3600
+    remaining = remaining % 3600
+    minutes = remaining // 60
+    seconds = remaining % 60
+    
+    if days > 0:
+        return f"{days}-{hours:02d}:{minutes:02d}:{seconds:02d}"
+    else:
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def calculate_srun_timeout_with_buffer(sbatch_timeout: str) -> str:
+    """
+    WORKAROUND: Calculate srun timeout by subtracting buffer from sbatch timeout.
+    
+    This ensures the workload times out before the overall job, allowing proper
+    exit code validation to distinguish actual failures from timeouts.
+    
+    Args:
+        sbatch_timeout: The sbatch (overall job) time limit in Slurm format
+        
+    Returns:
+        Adjusted time limit for srun in Slurm format
+        
+    Note:
+        This is a temporary workaround. Remove when underlying job exit issue is fixed.
+    """
+    try:
+        total_seconds = parse_slurm_time_to_seconds(sbatch_timeout)
+        adjusted_seconds = total_seconds - SRUN_TIMEOUT_BUFFER_SECONDS
+        
+        if adjusted_seconds <= 0:
+            logging.warning(
+                f"Timeout buffer ({SRUN_TIMEOUT_BUFFER_SECONDS}s) is >= total job time ({total_seconds}s). "
+                f"Using original timeout: {sbatch_timeout}"
+            )
+            return sbatch_timeout
+        
+        return format_seconds_to_slurm_time(adjusted_seconds)
+    except ValueError as e:
+        logging.warning(f"Failed to parse time limit '{sbatch_timeout}': {e}. Using original timeout.")
+        return sbatch_timeout
 
 
 def slurm_executor(
@@ -80,6 +196,11 @@ def slurm_executor(
     err_msgs = []
     mounts = []
     srun_args = custom_srun_args.copy() + ["--mpi=pmix", "--no-container-mount-home", "--container-writable"]
+
+    # WORKAROUND: Set srun timeout to be less than sbatch timeout
+    # This ensures jobs exit before hitting the sbatch timeout limit
+    srun_timeout = calculate_srun_timeout_with_buffer(time_limit)
+    srun_args.append(f"--time={srun_timeout}")
 
     if log_dir != get_nemorun_home():
         err_msgs.append(f"\nRun `export NEMORUN_HOME={log_dir}` in your shell environment and rerun this script.")
